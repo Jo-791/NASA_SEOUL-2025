@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NASA APTS SEOUL</title>
+
+  <!-- Pretendard 폰트 -->
+  <link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable.css" rel="stylesheet" />
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <!-- 커스텀 CSS -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- 헤더 -->
+  <header id="header" style="display: flex; align-items: center; gap: 10px; padding: 10px;">
+    <span class="logo" style="font-size: 24px;">🌱</span>
+    <span style="font-weight: bold; font-size: 22px;">APTS</span>
+    <input type="text" id="location-input" placeholder="지역명 입력" style="flex-grow: 1; padding: 8px; border-radius: 6px; border: 1px solid #ccc;" />
+    <button id="search-btn" style="padding: 8px 12px; border-radius: 6px; border:none; background:#7bb661; color:white; cursor:pointer;">검색</button>
+  </header>
+
+  <!-- 컨테이너 -->
+  <div id="container" style="display: flex; padding: 20px; gap: 20px;">
+    <div id="info-panel" style="width: 320px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; padding-right: 10px;">
+      <div id="aqi-box" class="info-box">
+        <h3>오늘의 대기질은?</h3>
+        <p id="aqi-text">불러오는 중...</p>
+      </div>
+
+      <div id="forecast-box" class="info-box">
+        <h3>예상 대기질</h3>
+        <p id="forecast-text">불러오는 중...</p>
+      </div>
+
+      <div id="wind-box" class="info-box">
+        <h3>바람 방향</h3>
+        <p id="wind-text">불러오는 중...</p>
+      </div>
+
+      <div id="factory-warning" class="info-box alert" style="display:none; background-color: #ffdddd; color: #a00; font-weight: bold; padding: 15px; border-radius: 10px; border: 2px solid #a00; text-align: center; margin-top: 15px; animation: pulse 1.5s infinite;">
+        <span class="emoji" style="font-size: 28px;">🏭 😷</span>
+        <span>공장 밀집 지역! 마스크 착용하세요!</span>
+      </div>
+
+      <div id="mood-box" class="info-box">
+        <div class="mood-text">오늘의 모습은?</div>
+        <div class="mood-image" style="font-size: 24px; margin-top: 10px;">😊</div>
+      </div>
+    </div>
+
+    <div id="map" style="flex: 1; min-height: 500px; border-radius: 16px; box-shadow: 0 4px 16px rgba(0,0,0,0.15); position: relative;">
+      <div id="wind-overlay" title="바람 방향" style="position: absolute; top: 45%; left: 50%; transform: translate(-50%, -50%); z-index: 900; font-size: 30px; background: rgba(255, 255, 255, 0.7); padding: 6px 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+        <span class="arrow">→</span>
+      </div>
+      <div id="compass" style="position: absolute; top: 10px; left: 10px; width: 60px; height: 60px; background: rgba(255,255,255,0.8); border-radius: 50%; font-weight: bold; font-size: 12px; color: #333; display: flex; justify-content: center; align-items: center; z-index: 900;">
+        <div class="n" style="position: absolute; top: 4px; left: 50%; transform: translateX(-50%);">N</div>
+        <div class="e" style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%);">E</div>
+        <div class="s" style="position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%);">S</div>
+        <div class="w" style="position: absolute; left: 4px; top: 50%; transform: translateY(-50%);">W</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <script>
+    // 지도 초기화
+    const map = L.map('map').setView([37.5665, 126.9780], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const aqiText = document.getElementById('aqi-text');
+    const forecastText = document.getElementById('forecast-text');
+    const windText = document.getElementById('wind-text');
+    const arrow = document.querySelector('#wind-overlay .arrow');
+    const factoryCard = document.getElementById('factory-warning');
+    const moodTextElem = document.querySelector('#mood-box .mood-text');
+    const moodImageElem = document.querySelector('#mood-box .mood-image');
+
+    // 예시 공장 위치
+    const factoryLocations = [
+      { lat: 35.87, lng: 128.60 },  // 대구
+      { lat: 36.42, lng: 128.16 },  // 성주
+      { lat: 36.41, lng: 128.16 },  // 상주
+    ];
+
+    // 📍 주소 → 위도/경도 변환 using Nominatim API (OpenStreetMap)
+    async function geocodeAddress(address) {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (data && data.length > 0) {
+        const place = data[0];
+        return { lat: parseFloat(place.lat), lng: parseFloat(place.lon) };
+      }
+      throw new Error("주소를 찾을 수 없습니다.");
+    }
+
+    // 공장 밀집 여부
+    function isFactoryDense(lat, lng) {
+      const radius = 0.3;
+      return factoryLocations.some(f => {
+        const dlat = lat - f.lat;
+        const dlng = lng - f.lng;
+        return Math.sqrt(dlat * dlat + dlng * dlng) < radius;
+      });
+    }
+
+    // 지역별 대기질 판단 (단순 문자열 포함으로 예시)
+    function getInitialAQIStateByAddress(address) {
+      if (address.includes("경상")) return '나쁨';
+      if (address.includes("충청")) return '보통';
+      if (address.includes("서울") || address.includes("경기") || address.includes("강원")) return '좋음';
+      return '좋음';
+    }
+
+    // 바람 방향 예시
+    function getWindInfo(lat, lng) {
+      if (lng > 128) return { direction: '남서풍', emoji: '⬋' };
+      if (lat > 37.5) return { direction: '북풍', emoji: '⬆' };
+      return { direction: '동풍', emoji: '➡' };
+    }
+
+    // 예측 대기질 변화
+    function getForecastState(aqiState) {
+      const rand = Math.random() * 100;
+      if (aqiState === '좋음') return rand < 10 ? '나쁨' : '좋음';
+      if (aqiState === '나쁨') return rand < 80 ? '나쁨' : '좋음';
+      if (aqiState === '보통') return rand < 30 ? '나쁨' : '좋음';
+      return aqiState;
+    }
+
+    // 오늘의 표정
+    function getMoodForAQI(aqiState) {
+      if (aqiState === '좋음') return { text: '모두 활짝 웃고 있어요!', emoji: '😊' };
+      if (aqiState === '보통') return { text: '조금 주의가 필요해요', emoji: '😐' };
+      if (aqiState === '나쁨') return { text: '마스크 꼭 착용하세요!', emoji: '😷' };
+      return { text: '', emoji: '' };
+    }
+
+    // UI 갱신
+    function updateUI(lat, lng, address = "") {
+      const initial = getInitialAQIStateByAddress(address);
+      const forecast = getForecastState(initial);
+      const windInfo = getWindInfo(lat, lng);
+
+      aqiText.innerHTML = `${initial} <span class="emoji-large">${initial === '나쁨' ? '😷' : '😊'}</span>`;
+      forecastText.innerHTML = `${forecast} <span class="emoji-large">${forecast === '나쁨' ? '😷' : '😊'}</span>`;
+      windText.innerHTML = `${windInfo.direction} <span class="emoji-large">${windInfo.emoji}</span>`;
+      arrow.textContent = windInfo.emoji;
+
+      const mood = getMoodForAQI(initial);
+      moodTextElem.textContent = mood.text;
+      moodImageElem.textContent = mood.emoji;
+
+      factoryCard.style.display = isFactoryDense(lat, lng) ? 'flex' : 'none';
+
+      // 색 조정 (class명에 맞게 조정)
+      document.getElementById('aqi-box').className = initial === '나쁨' ? 'info-box bad' : 'info-box good';
+      document.getElementById('forecast-box').className = forecast === '나쁨' ? 'info-box bad' : 'info-box good';
+    }
+
+    // 검색창, 버튼 가져오기
+    const searchBtn = document.getElementById('search-btn');
+    const locationInput = document.getElementById('location-input');
+
+    // 검색 버튼 클릭 시 주소로 이동 & UI 갱신
+    searchBtn.addEventListener('click', async () => {
+      const address = locationInput.value.trim();
+      if (!address) return alert('지역명을 입력해주세요.');
+      try {
+        const { lat, lng } = await geocodeAddress(address);
+        map.setView([lat, lng], 10);
+        updateUI(lat, lng, address);
+      } catch (err) {
+        alert('주소를 찾을 수 없습니다.');
+      }
+    });
+
+    // 지도 이동 시 자동 갱신 (주소는 비어 있음)
+    map.on('moveend', () => {
+      const center = map.getCenter();
+      updateUI(center.lat, center.lng);
+    });
+
+    // 초기 위치 설정 (서울)
+    updateUI(37.5665, 126.9780, "서울");
+  </script>
+
+</body>
+</html>
